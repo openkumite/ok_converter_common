@@ -8,7 +8,9 @@ use anyhow::{Context, Result};
 use std::io::{Read, Seek};
 use std::path::PathBuf;
 
+mod layered;
 mod pack;
+pub use layered::Layered;
 pub use pack::{PackVfs, StdStore, Store, list_paths, path_exists};
 
 pub trait ReadSeek: Read + Seek + Send {}
