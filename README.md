@@ -27,6 +27,12 @@ A converter that needs only files (Counter-Strike) takes it with `default-featur
 
 `sh check.sh` runs formatting, clippy, the tests and `cargo deny`; the git hooks (cargo-husky) and CI run it.
 
+## Releases
+
+A tag `vX.Y.Z` (Cargo.toml's version; only organisation admins push `v*` tags) publishes a release: `serve` for
+Linux (amd64, arm64), Windows and macOS (universal), with SHA256SUMS (`.github/workflows/release.yml`). `main` takes
+pull requests only, its CI passing; Dependabot opens one grouped pull request a week.
+
 ## License
 
 MIT ([LICENSE](LICENSE)).
