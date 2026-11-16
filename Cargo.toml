@@ -1,6 +1,6 @@
 [package]
 name = "ok_converter_common"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "What the OpenKumite converters share, with no game in it: disc and file input/output, PlayStation media, portable float maths"
 license = "MIT"
@@ -12,6 +12,8 @@ default = ["psx", "np"]
 psx = ["dep:image", "dep:flacenc"]
 # the same float maths on every platform: small matrices' SVD and inverse, fma (`np`)
 np = ["dep:libm"]
+# disc images in every common format: .cue/.bin, .iso, .chd, .ccd/.img, .mds/.mdf, .ecm, .pbp (`disc`)
+disc = ["dep:chd", "dep:flate2"]
 
 [dependencies]
 anyhow = "1"
@@ -20,6 +22,8 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 flacenc = { version = "0.5", default-features = false, optional = true }
 # pinned: an update could change the converters' output bits
 libm = { version = "=0.2.16", optional = true }
+chd = { version = "0.4", default-features = false, features = ["std", "want_raw_data_sector"], optional = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"], optional = true }
 
 [dev-dependencies]
 symphonia = { version = "0.6", default-features = false, features = ["flac"] }

@@ -21,6 +21,11 @@ pub trait DiscFile: Send + Sync {
     /// The file's name, for messages and the manifest (`Tekken_3_(USA)_(Track 1).bin`).
     fn name(&self) -> String;
     fn open(&self) -> Result<Box<dyn ReadSeek>>;
+    /// Whether its sectors are whole (2352 bytes, as the disc has them); false when the image kept only each sector's
+    /// 2048 bytes of data (an ISO): a PlayStation disc's XA audio and movies, in Mode 2 Form 2 sectors, are not in it.
+    fn whole_sectors(&self) -> bool {
+        true
+    }
 }
 
 /// One entry of a folder listing.
