@@ -33,12 +33,20 @@ This crate holds no game data and knows no game.
 | Alcohol 120% | `.mds` with its `.mdf` | version 1 |
 | ECM | `.bin.ecm`, alone or named by a `.cue` | the sectors' error codes rebuilt |
 | PBP | a PSP `EBOOT.PBP` made by popstation | not an encrypted one from a store; multi-disc: the first disc |
+| Archives | `.zip`, `.7z`, `.tar`, `.gz`, `.xz`, `.zst` (`.tgz`, `.txz`, `.tzst`) holding any of the above | unpacked first (see below) |
+
+An archive's disc files (by extension, without its folders) are unpacked once into a scratch `Store`
+(`Disc::open_unpacking`; `Disc::open_path` and `open_path_in` use a temporary file, removed when the disc goes; the
+browser gives its own storage), and the image is found among them as `main_image` finds it. ZIP methods: stored,
+deflate, deflate64, bzip2, LZMA, XZ, PPMd (not zstd, not encrypted); 7z: LZMA, LZMA2, bzip2, deflate, PPMd, BCJ
+(not encrypted). All pure Rust: the browser build reads them too.
 
 Each `Track` reads as the split `.bin` of that track would: an audio track from its pregap (silence where the image
 keeps none), a data track from INDEX 01, sectors rebuilt whole (sync, header, EDC and ECC) where the image keeps less.
 `main_image` picks the image among several files (a folder, a multi-file pick). The tests write a small disc in every
 format and read it back; `real_disc_formats` (ignored) does it with a real disc (`OK_DISC_CUE`, `OK_DISC_OUT`; with
-`chdman` on the PATH it makes the `.chd` too).
+`chdman` on the PATH it makes the `.chd` too); `real_archives` (ignored) reads archives of a real disc made by the
+real tools (`OK_DISC_CUE`, `OK_ARCHIVES`).
 
 A converter that needs only files (Counter-Strike) takes it with `default-features = false`.
 
