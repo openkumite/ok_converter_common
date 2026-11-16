@@ -317,8 +317,9 @@ fn open_file(folder: &dyn Folder, file: Arc<dyn DiscFile>, name: &str) -> Result
     disc(format, lone(folder, file, &image)?)
 }
 
-/// The sheet beside an image that names it: `name`'s own (same name, `.cue`, `.ccd`, `.mds`), a `.cue` that names
-/// it, or the `.cue` of a split image (`... (Track 1).bin`: `....cue`).
+/// The sheet beside an image that names it: a `.cue` that names it (of the same name first, or a split image's:
+/// `... (Track 1).bin`'s `....cue`), the `.ccd` of an `.img`, the `.mds` of an `.mdf` (of the same name). A sheet of
+/// the same name for another image (`game.iso` beside `game.ccd` and `game.img`) is not this image's.
 fn sheet_beside(folder: &dyn Folder, name: &str) -> Result<Option<Disc>> {
     let files = folder.files();
     let base = stem(name);
@@ -329,7 +330,12 @@ fn sheet_beside(folder: &dyn Folder, name: &str) -> Result<Option<Disc>> {
         (format!("{base}.mds"), "mds"),
         (format!("{split}.cue"), "cue"),
     ] {
-        if want == name {
+        let own = match sheet {
+            "ccd" => ext(name) == "img",
+            "mds" => ext(name) == "mdf",
+            _ => true,
+        };
+        if want == name || !own {
             continue;
         }
         let Some((n, _)) = files.iter().find(|(n, _)| loose(n) == loose(&want)) else { continue };

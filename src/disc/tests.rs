@@ -288,6 +288,10 @@ fn clonecd() {
     f.put("game.ccd", ccd.into_bytes());
     check(&Disc::open(&f, "game.ccd").unwrap(), &want, true);
     check(&Disc::open(&f, "game.img").unwrap(), &want, true);
+    // an image of the same name beside them is its own (not the .ccd's)
+    f.put("game.iso", want[0].chunks_exact(RAW).flat_map(|s| s[24..24 + 2048].to_vec()).collect());
+    let iso = Disc::open(&f, "game.iso").unwrap();
+    assert_eq!((iso.format, iso.tracks.len()), ("iso", 1));
 }
 
 /// An Alcohol .mds for an .mdf of the tracks (their pregaps not kept, as libmirage reads them).
@@ -347,6 +351,9 @@ fn alcohol() {
     );
     check(&Disc::open(&f, "game.mds").unwrap(), &want, true);
     check(&Disc::open(&f, "game.mdf").unwrap(), &want, true);
+    f.put("game.bin", want[0].clone());
+    let bin = Disc::open(&f, "game.bin").unwrap();
+    assert_eq!((bin.format, bin.tracks.len()), ("bin", 1));
 }
 
 /// ECM-encodes `raw` (a raw .bin) as ecm.c does: a Mode 2 sector's sync and header kept as bytes, its rest as a
