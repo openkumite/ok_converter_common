@@ -128,22 +128,25 @@ fn avi_as_the_engine_reads_it() {
 
 #[test]
 fn flac_round_trip() {
-    use symphonia::core::{codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream, probe::Hint};
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::{FormatOptions, TrackType, probe::Hint};
+    use symphonia::core::io::MediaSourceStream;
     let samples: Vec<i16> = (0..50_000).map(|i: i32| ((i * 37 % 2000 - 1000) * (i % 7)) as i16).collect();
     let f = flac(&Pcm { rate: 37800, channels: 2, samples: samples.clone() }).unwrap();
     let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(f)), Default::default());
-    let mut probed = symphonia::default::get_probe()
-        .format(&Hint::new(), mss, &FormatOptions::default(), &Default::default())
-        .unwrap();
-    let track = probed.format.default_track().unwrap();
-    assert_eq!(track.codec_params.sample_rate, Some(37800));
-    let mut dec = symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default()).unwrap();
+    let mut format =
+        symphonia::default::get_probe().probe(&Hint::new(), mss, FormatOptions::default(), Default::default()).unwrap();
+    let track = format.default_track(TrackType::Audio).unwrap();
+    let params = track.codec_params.as_ref().unwrap().audio().unwrap().clone();
+    assert_eq!(params.sample_rate, Some(37800));
+    let mut dec =
+        symphonia::default::get_codecs().make_audio_decoder(&params, &AudioDecoderOptions::default()).unwrap();
     let mut got = Vec::new();
-    while let Ok(p) = probed.format.next_packet() {
+    while let Some(p) = format.next_packet().unwrap() {
         let buf = dec.decode(&p).unwrap();
-        let mut s = symphonia::core::audio::SampleBuffer::<i16>::new(buf.capacity() as u64, *buf.spec());
-        s.copy_interleaved_ref(buf);
-        got.extend_from_slice(s.samples());
+        let mut s = vec![0i16; buf.samples_interleaved()];
+        buf.copy_to_slice_interleaved(&mut s);
+        got.extend_from_slice(&s);
     }
     assert_eq!(got, samples);
 }
