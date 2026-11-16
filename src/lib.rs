@@ -1,7 +1,8 @@
 //! What the OpenKumite converters share, with no game in it:
 //!
 //! - [`disc`] (feature `disc`): disc images in the formats players keep them in (.cue/.bin, .iso, .chd, .ccd/.img,
-//!   .mds/.mdf, .ecm, .pbp), read as tracks of raw sectors, and the data track's ISO 9660 files;
+//!   .mds/.mdf, .ecm, .pbp; or in an archive: .zip, .7z, .tar, .gz, .xz, .zst), read as tracks of raw sectors, and
+//!   the data track's ISO 9660 files;
 //! - [`io`]: disc images to read, a tree of files to read and write (a folder, a pack file, a game folder read only),
 //!   the progress log;
 //! - [`psx`] (feature `psx`): PlayStation media in place of ffmpeg: XA ADPCM sound and STR (MDEC) movies from raw CD

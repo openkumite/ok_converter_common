@@ -10,10 +10,14 @@
 //! - `.ecm` (a `.bin` with its error codes taken out: `.bin.ecm`, alone or named by a `.cue`);
 //! - `.pbp`: a PSP EBOOT of a PlayStation disc as popstation makes them (not an encrypted one bought from a store).
 //!
+//! An archive (`.zip`, `.7z`, `.tar`, `.gz`, `.xz`, `.zst`) holding any of those is unpacked first into a scratch
+//! store ([`Disc::open_unpacking`]; [`Disc::open_path`] uses a temporary file).
+//!
 //! A track holds what a split `.bin` of it would: an audio track from its pregap (INDEX 00; silence where the image
 //! keeps no pregap), a data track from INDEX 01. [`Disc::open`] takes the image the player chose in a [`Folder`] (the
 //! files beside it: the `.bin` a `.cue` names, the `.cue` beside a `.bin`).
 
+mod archive;
 mod chd;
 mod ecm;
 mod iso9660;
@@ -23,9 +27,10 @@ mod sheet;
 #[cfg(test)]
 mod tests;
 
+pub use archive::{ARCHIVES, TempStore, Unpacked, is_archive, unpack};
 pub use iso9660::Iso;
 
-use crate::io::{DiscFile, ReadSeek};
+use crate::io::{DiscFile, ReadSeek, Store};
 use anyhow::{Context, Result, bail};
 use sector::RAW;
 use std::io::{Read, Seek, SeekFrom};
@@ -33,6 +38,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The extensions of the images [`Disc::open`] reads (and of the files they name), for pickers.
+/// (Archives that hold them: [`ARCHIVES`].)
 pub const EXTENSIONS: [&str; 12] = ["cue", "bin", "iso", "chd", "ccd", "img", "sub", "mds", "mdf", "ecm", "pbp", "wav"];
 
 /// The files beside the image: a folder, or the files the player picked.
@@ -95,7 +101,7 @@ fn find(folder: &dyn Folder, name: &str) -> Result<Option<Arc<dyn DiscFile>>> {
 }
 
 /// The image to open among several files (a folder, the files the player picked): a sheet (`.cue`, `.ccd`, `.mds`),
-/// else a `.chd` or `.pbp`, else the image named Track 1, else the largest.
+/// else a `.chd` or `.pbp`, else the image named Track 1, else the largest; else an archive (the largest).
 pub fn main_image(folder: &dyn Folder) -> Option<String> {
     let files = folder.files();
     let of = |exts: &[&str]| {
@@ -108,7 +114,8 @@ pub fn main_image(folder: &dyn Folder) -> Option<String> {
     }
     let images = of(&["bin", "iso", "img", "mdf", "ecm"]);
     let track1 = images.iter().find(|(n, _)| n.contains("Track 1)") || n.contains("Track 01)"));
-    track1.or_else(|| images.iter().max_by_key(|(_, s)| *s)).map(|(n, _)| n.clone())
+    let image = track1.or_else(|| images.iter().max_by_key(|(_, s)| *s)).map(|(n, _)| n.clone());
+    image.or_else(|| of(&ARCHIVES).into_iter().max_by_key(|(_, s)| *s).map(|(n, _)| n))
 }
 
 /// What a sector of the image keeps of the raw sector.
@@ -209,17 +216,45 @@ pub struct Disc {
     pub format: &'static str,
     /// Its tracks, by number; those the image does not keep are not here.
     pub tracks: Vec<Track>,
+    /// The archive it was unpacked from, if it was.
+    pub archive: Option<String>,
 }
 
 impl Disc {
-    /// The image `name` in `folder`, with the files it names there.
+    /// The image `name` in `folder`, with the files it names there (an archive: [`Disc::open_unpacking`]).
     pub fn open(folder: &dyn Folder, name: &str) -> Result<Disc> {
+        if is_archive(name) {
+            bail!("{name} is an archive: it is unpacked first (Disc::open_unpacking)");
+        }
         let file = find(folder, name)?.with_context(|| format!("there is no {name}"))?;
         open_file(folder, file, name)
     }
 
-    /// The image at `path`, with the files beside it.
-    pub fn open_path(path: &std::path::Path) -> Result<Disc> {
+    /// The image `name` in `folder`; an archive unpacked first into the store `scratch` gives (its disc files, the
+    /// image found among them as [`main_image`] finds it; the progress in `log`). The store lasts as long as the
+    /// disc's tracks.
+    pub fn open_unpacking(
+        folder: &dyn Folder,
+        name: &str,
+        scratch: &dyn Fn() -> Result<Arc<dyn Store>>,
+        log: &(dyn Fn(&str) + Sync),
+    ) -> Result<Disc> {
+        if !is_archive(name) {
+            return Disc::open(folder, name);
+        }
+        let file = find(folder, name)?.with_context(|| format!("there is no {name}"))?;
+        let unpacked = unpack(file.as_ref(), scratch()?, log)?;
+        let image = main_image(&unpacked).with_context(|| format!("{name} holds no disc image"))?;
+        Ok(Disc { archive: Some(unpacked.archive.clone()), ..Disc::open(&unpacked, &image)? })
+    }
+
+    /// The image at `path`, with the files beside it; an archive unpacked into a temporary file in `scratch_dir`
+    /// (removed when the disc goes).
+    pub fn open_path_in(
+        path: &std::path::Path,
+        scratch_dir: &std::path::Path,
+        log: &(dyn Fn(&str) + Sync),
+    ) -> Result<Disc> {
         if !path.is_file() {
             bail!("there is no disc image at {}", path.display());
         }
@@ -228,7 +263,13 @@ impl Disc {
             |d| if d.as_os_str().is_empty() { PathBuf::from(".") } else { d.to_path_buf() },
         );
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Disc::open(&StdFolder(dir), &name)
+        let scratch = || -> Result<Arc<dyn Store>> { Ok(Arc::new(TempStore::new(scratch_dir)?)) };
+        Disc::open_unpacking(&StdFolder(dir), &name, &scratch, log)
+    }
+
+    /// The image at `path`, with the files beside it; an archive unpacked into the system's temporary folder.
+    pub fn open_path(path: &std::path::Path) -> Result<Disc> {
+        Disc::open_path_in(path, &std::env::temp_dir(), &|_| {})
     }
 
     pub fn track(&self, number: u8) -> Option<&Track> {
@@ -259,7 +300,8 @@ impl Disc {
                 format!("track {} {what}, {} sectors", t.number, t.len())
             })
             .collect();
-        format!("{} ({}): {}", self.image, self.format, tracks.join("; "))
+        let from = self.archive.as_ref().map_or(String::new(), |a| format!(", in {a}"));
+        format!("{} ({}{from}): {}", self.image, self.format, tracks.join("; "))
     }
 }
 
@@ -278,7 +320,7 @@ fn open_file(folder: &dyn Folder, file: Arc<dyn DiscFile>, name: &str) -> Result
     let start = head(file.as_ref(), 64)?;
     let is = |magic: &[u8]| start.starts_with(magic);
     let image = name.rsplit(['/', '\\']).next().unwrap_or(name).to_string();
-    let disc = |format, tracks| Ok(Disc { image: image.clone(), format, tracks });
+    let disc = |format, tracks| Ok(Disc { image: image.clone(), format, tracks, archive: None });
     if is(b"MComprHD") {
         return disc("chd", chd::tracks(file, &image)?);
     }

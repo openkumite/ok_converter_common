@@ -500,6 +500,104 @@ fn pbp() {
     check(&d, &want, true);
 }
 
+/// A scratch store in memory.
+#[derive(Default)]
+struct MemStore(std::sync::Mutex<Vec<u8>>);
+impl crate::io::Store for MemStore {
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<()> {
+        let d = self.0.lock().unwrap();
+        buf.copy_from_slice(d.get(off as usize..off as usize + buf.len()).context("past the end")?);
+        Ok(())
+    }
+    fn write_at(&self, off: u64, data: &[u8]) -> Result<()> {
+        let mut d = self.0.lock().unwrap();
+        let end = off as usize + data.len();
+        if d.len() < end {
+            d.resize(end, 0);
+        }
+        d[off as usize..end].copy_from_slice(data);
+        Ok(())
+    }
+    fn size(&self) -> Result<u64> {
+        Ok(self.0.lock().unwrap().len() as u64)
+    }
+    fn truncate(&self, len: u64) -> Result<()> {
+        self.0.lock().unwrap().truncate(len as usize);
+        Ok(())
+    }
+    fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn open_archive(f: &MemFolder, name: &str) -> Result<Disc> {
+    let scratch = || -> Result<Arc<dyn crate::io::Store>> { Ok(Arc::new(MemStore::default())) };
+    Disc::open_unpacking(f, name, &scratch, &|_| {})
+}
+
+fn tarball(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut t = tar::Builder::new(Vec::new());
+    for (name, data) in files {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        t.append_data(&mut h, name, *data).unwrap();
+    }
+    t.into_inner().unwrap()
+}
+
+#[test]
+fn archives() {
+    let want = disc();
+    let (bin, cue) = single(&want);
+    // in a folder of the archive, with a file that is no disc image beside them
+    let files: [(&str, &[u8]); 3] =
+        [("Game/game.cue", cue.as_bytes()), ("Game/game.bin", &bin), ("Game/readme.txt", b"hi")];
+    let mut f = MemFolder::default();
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in files {
+        z.start_file(
+            name,
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated),
+        )
+        .unwrap();
+        z.write_all(data).unwrap();
+    }
+    f.put("game.zip", z.finish().unwrap().into_inner());
+    let mut sz = sevenz_rust2::ArchiveWriter::new(Cursor::new(Vec::new())).unwrap();
+    for (name, data) in files {
+        sz.push_archive_entry(sevenz_rust2::ArchiveEntry::new_file(name), Some(data)).unwrap();
+    }
+    f.put("game.7z", sz.finish().unwrap().into_inner());
+    let tar = tarball(&files);
+    f.put("game.tar", tar.clone());
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    gz.write_all(&tar).unwrap();
+    f.put("game.tar.gz", gz.finish().unwrap());
+    f.put("game.tzst", ruzstd::encoding::compress_to_vec(&tar[..], ruzstd::encoding::CompressionLevel::Fastest));
+    for name in ["game.zip", "game.7z", "game.tar", "game.tar.gz", "game.tzst"] {
+        let d = open_archive(&f, name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+        assert_eq!((d.format, d.archive.as_deref()), ("cue", Some(name)));
+        check(&d, &want, true);
+    }
+    // one image compressed alone: what it holds is its name without the extension
+    let mut xz = lzma_rust2::XzWriter::new(Vec::new(), lzma_rust2::XzOptions::with_preset(1)).unwrap();
+    xz.write_all(&want[0]).unwrap();
+    f.put("t1.bin.xz", xz.finish().unwrap());
+    let d = open_archive(&f, "t1.bin.xz").unwrap();
+    assert!(read_all(d.data().unwrap()) == want[0]);
+    // the image to open among the files: an archive when there is nothing else
+    let mut only = MemFolder::default();
+    only.put("game.7z", f.0["game.7z"].to_vec());
+    assert_eq!(main_image(&only).as_deref(), Some("game.7z"));
+    assert!(Disc::open(&f, "game.zip").is_err(), "an archive needs a place to unpack");
+    // an archive with no disc image in it
+    f.put("notes.tar", tarball(&[("notes.txt", b"no disc")]));
+    let e = open_archive(&f, "notes.tar").err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(e.contains("holds no disc image"), "{e}");
+}
+
 #[test]
 fn not_an_image() {
     let mut f = MemFolder::default();
@@ -629,6 +727,24 @@ fn real_disc_formats() {
     assert_eq!(a.files, b.files);
     for (name, lba, size) in a.files.clone() {
         assert!(a.read_file(lba, size).unwrap() == b.read_file(lba, size).unwrap(), "{name}");
+    }
+}
+
+/// The archives at `OK_ARCHIVES` (`|`-separated: each holding the disc at `OK_DISC_CUE`, made by the real tools: zip,
+/// 7z, tar with gzip / xz / zstd) read back: each track as the disc's.
+/// `OK_DISC_CUE=... OK_ARCHIVES='a.zip|b.7z' cargo test --release --features disc real_archives -- --ignored`
+#[test]
+#[ignore]
+fn real_archives() {
+    let cue = std::path::PathBuf::from(std::env::var("OK_DISC_CUE").unwrap());
+    let disc = Disc::open_path(&cue).unwrap();
+    let want: Vec<u128> = disc.tracks.iter().map(|t| fnv(&read_all(t))).collect();
+    for archive in std::env::var("OK_ARCHIVES").unwrap().split('|') {
+        let start = std::time::Instant::now();
+        let d = Disc::open_path(std::path::Path::new(archive)).unwrap_or_else(|e| panic!("{archive}: {e:#}"));
+        println!("{} in {:.0} s", d.summary(), start.elapsed().as_secs_f64());
+        let got: Vec<u128> = d.tracks.iter().map(|t| fnv(&read_all(t))).collect();
+        assert_eq!(got, want, "{archive}");
     }
 }
 
