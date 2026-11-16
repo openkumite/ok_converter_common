@@ -12,11 +12,11 @@ fmt() {
 }
 lint() {
     step clippy
-    cargo clippy --workspace --all-targets --release -q -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --release -q -- -D warnings
 }
 tests() {
     step test
-    if ! out=$(cargo test --workspace --release 2>&1); then
+    if ! out=$(cargo test --workspace --all-features --release 2>&1); then
         printf '%s\n' "$out" | grep -vE '^test .* ok$|^running |^$' | tail -80
         return 1
     fi
