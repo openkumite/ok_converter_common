@@ -57,6 +57,10 @@ pub trait Vfs: Send + Sync {
     fn read_string(&self, path: &str) -> Result<String> {
         String::from_utf8(self.read(path)?).with_context(|| format!("{path} is not UTF-8 text"))
     }
+    /// A file's bytes (a folder and a pack say it without reading the file).
+    fn size(&self, path: &str) -> Result<u64> {
+        Ok(self.read(path)?.len() as u64)
+    }
 }
 
 /// `a/b` joined (an empty part left out).
@@ -130,6 +134,10 @@ impl Vfs for StdFs {
             _ => Ok(()),
         }
     }
+    fn size(&self, path: &str) -> Result<u64> {
+        let p = self.path(path);
+        Ok(std::fs::metadata(&p).with_context(|| format!("cannot read {}", p.display()))?.len())
+    }
 }
 
 /// A sub-folder of another `Vfs` as a `Vfs` of its own.
@@ -153,6 +161,43 @@ impl Vfs for Sub<'_> {
     }
     fn remove_all(&self, path: &str) -> Result<()> {
         self.inner.remove_all(&join(&self.prefix, path))
+    }
+    fn size(&self, path: &str) -> Result<u64> {
+        self.inner.size(&join(&self.prefix, path))
+    }
+}
+
+/// Another `Vfs` whose writes of the files `left_out` names are dropped (a conversion that leaves parts out: they
+/// are never written); the rest goes through.
+pub struct Without<'a> {
+    pub inner: &'a dyn Vfs,
+    pub left_out: &'a (dyn Fn(&str) -> bool + Sync),
+}
+
+impl Vfs for Without<'_> {
+    fn read(&self, path: &str) -> Result<Vec<u8>> {
+        self.inner.read(path)
+    }
+    fn write(&self, path: &str, data: &[u8]) -> Result<()> {
+        if (self.left_out)(path) { Ok(()) } else { self.inner.write(path, data) }
+    }
+    fn exists(&self, path: &str) -> bool {
+        self.inner.exists(path)
+    }
+    fn list(&self, dir: &str) -> Result<Vec<Entry>> {
+        self.inner.list(dir)
+    }
+    fn remove_all(&self, path: &str) -> Result<()> {
+        self.inner.remove_all(path)
+    }
+    fn done(&self) -> Option<Vec<String>> {
+        self.inner.done()
+    }
+    fn checkpoint(&self, done: &[String]) -> Result<()> {
+        self.inner.checkpoint(done)
+    }
+    fn size(&self, path: &str) -> Result<u64> {
+        self.inner.size(path)
     }
 }
 
@@ -203,6 +248,12 @@ mod tests {
         fs.remove_all("a").unwrap();
         fs.remove_all("a").unwrap();
         assert!(!fs.exists("a/b/c.json"));
+        // (a part left out: its writes dropped)
+        let without = Without { inner: &fs, left_out: &|p| p.starts_with("video/") };
+        without.write("video/00.avi", b"movie").unwrap();
+        without.write("gamedata/x.json", b"{}").unwrap();
+        assert!(!fs.exists("video") && without.size("gamedata/x.json").unwrap() == 2);
+        fs.remove_all("gamedata").unwrap();
         assert_eq!(join("x/", "/y"), "x/y");
         assert_eq!(join("", "y"), "y");
         std::fs::remove_dir_all(root).unwrap();

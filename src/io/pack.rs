@@ -118,6 +118,54 @@ impl PackVfs {
     fn state(&self) -> Result<MutexGuard<'_, Index>> {
         self.state.lock().map_err(|_| anyhow::anyhow!("the pack's lock is poisoned"))
     }
+
+    /// The pack's bytes first, then the index that points at them.
+    fn write_index(&self, s: &Index) -> Result<()> {
+        let files: serde_json::Map<String, Value> =
+            s.files.iter().map(|(k, &(o, l))| (k.clone(), json!([o, l]))).collect();
+        let index = serde_json::to_vec(&json!({"version": 1, "files": files, "done": s.done}))?;
+        self.pack.flush().context("cannot write the pack")?;
+        self.index.write_at(0, &index).context("cannot write the pack's index")?;
+        self.index.truncate(index.len() as u64)?;
+        self.index.flush().context("cannot write the pack's index")
+    }
+
+    /// Gives back the space of the files removed or written again: the rest moved down over it, in their order, and
+    /// the pack cut to its end. A file moves only into bytes the index last written points at no longer (that index is
+    /// written again first when a move would reach them), so a pack stopped part way opens whole.
+    pub fn compact(&self) -> Result<()> {
+        let mut s = self.state()?;
+        self.write_index(&s)?;
+        let mut order: Vec<(u64, u64, String)> = s.files.iter().map(|(k, &(o, l))| (o, l, k.clone())).collect();
+        order.sort();
+        // (the lowest place the index written last points at, of the files moved since)
+        let (mut end, mut pointed) = (0, u64::MAX);
+        let mut buf = Vec::new();
+        for (off, len, path) in order {
+            // (one that would move over itself stays)
+            if end + len > off {
+                end = end.max(off + len);
+                continue;
+            }
+            if end + len > pointed {
+                self.write_index(&s)?;
+                pointed = u64::MAX;
+            }
+            let mut at = 0;
+            while at < len {
+                buf.resize((len - at).min(1 << 22) as usize, 0);
+                self.pack.read_at(off + at, &mut buf)?;
+                self.pack.write_at(end + at, &buf)?;
+                at += buf.len() as u64;
+            }
+            s.files.insert(path, (end, len));
+            pointed = pointed.min(off);
+            end += len;
+        }
+        self.write_index(&s)?;
+        s.end = end;
+        self.pack.truncate(end)
+    }
 }
 
 type Files = BTreeMap<String, (u64, u64)>;
@@ -174,17 +222,14 @@ impl Vfs for PackVfs {
     fn done(&self) -> Option<Vec<String>> {
         self.state().ok().map(|s| s.done.clone())
     }
-    /// The pack's bytes first, then the index that points at them.
     fn checkpoint(&self, done: &[String]) -> Result<()> {
         let mut s = self.state()?;
         s.done = done.to_vec();
-        let files: serde_json::Map<String, Value> =
-            s.files.iter().map(|(k, &(o, l))| (k.clone(), json!([o, l]))).collect();
-        let index = serde_json::to_vec(&json!({"version": 1, "files": files, "done": s.done}))?;
-        self.pack.flush().context("cannot write the pack")?;
-        self.index.write_at(0, &index).context("cannot write the pack's index")?;
-        self.index.truncate(index.len() as u64)?;
-        self.index.flush().context("cannot write the pack's index")
+        self.write_index(&s)
+    }
+    fn size(&self, path: &str) -> Result<u64> {
+        let path = clean(path);
+        self.state()?.files.get(&path).map(|f| f.1).with_context(|| format!("cannot read {path}: not in the pack"))
     }
 }
 
@@ -259,5 +304,30 @@ mod tests {
         // an index cut off: a new pack
         index.truncate(5).unwrap();
         assert!(!open().exists("a"));
+    }
+
+    /// Compacting gives back the space of files removed or written again; the rest reads as before, reopened too.
+    #[test]
+    fn pack_compacts() {
+        let (pack, index) = (Mem::default(), Mem::default());
+        let open = || PackVfs::open(Box::new(pack.clone()), Box::new(index.clone())).unwrap();
+        let fs = open();
+        let data = |n: u8, len: usize| vec![n; len];
+        for (k, len) in [(1, 300), (2, 5_000_000), (3, 7), (4, 900), (5, 0), (6, 4_000)] {
+            fs.write(&format!("f{k}"), &data(k, len)).unwrap();
+        }
+        fs.write("f4", &data(40, 20)).unwrap();
+        fs.remove_all("f2").unwrap();
+        fs.checkpoint(&["s".into()]).unwrap();
+        fs.compact().unwrap();
+        let expect = [(1, 300), (3, 7), (4, 20), (5, 0), (6, 4_000)];
+        assert_eq!(pack.size().unwrap(), expect.iter().map(|e| e.1 as u64).sum::<u64>());
+        for fs in [fs, open()] {
+            for (k, len) in expect {
+                assert_eq!(fs.read(&format!("f{k}")).unwrap(), data(if k == 4 { 40 } else { k }, len), "f{k}");
+                assert_eq!(fs.size(&format!("f{k}")).unwrap(), len as u64);
+            }
+            assert!(!fs.exists("f2") && fs.done() == Some(vec!["s".to_string()]));
+        }
     }
 }
