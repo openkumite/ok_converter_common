@@ -16,7 +16,7 @@ This crate holds no game data and knows no game.
 | Module | Feature | What it is |
 |---|---|---|
 | `disc` | `disc` | disc images in the formats players keep them in, each read as the disc's tracks of raw 2352-byte sectors (see below), and the data track's files (ISO 9660) |
-| `io` | always | disc images to read (`DiscFile`), a tree of files to read and write (`Vfs`: a folder, a pack file, a game folder read only), the progress log (`Ctx`) |
+| `io` | always | disc images to read (`DiscFile`), a tree of files to read and write (`Vfs`: a folder, a pack file, compacted after removals, a game folder read only; `Without`: one that drops the writes of files a conversion leaves out), the progress log (`Ctx`) |
 | `psx` | `psx` (default) | PlayStation media in place of ffmpeg: XA ADPCM sound and STR (MDEC) movies from raw CD sectors, out as FLAC and Motion-JPEG AVI |
 | `np` | `np` (default) | the converters' small float64 matrix maths (`svd`, `inv4`, `fma`), the same bits on every platform |
 
